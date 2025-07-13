@@ -47,12 +47,14 @@ RAWG_API_KEY=your_rawg_key
 Run the server:
 ```
 node index.js
-```In a new terminal, run the client:
+```
+
+In a new terminal, run the client:
 
 ```
 cd client
 npm run dev
-```
+
 Open your browser at http://localhost:3000 (or the port your client runs on) to use TasteLoop.
 
 ## 🏗 Project Structure
