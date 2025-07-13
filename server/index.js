@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_API_KEY = process.env.GROK_API_KEY; // your Groq API key
+const GROQ_API_KEY = process.env.GROK_API_KEY; // fixed typo here
 
 const extractionFn = {
   name: "extract_preferences",
@@ -29,7 +29,7 @@ app.post("/recommend", async (req, res) => {
     const { prompt = "", likes = [], dislikes = [] } = req.body;
     const seed = `${prompt}. Likes: ${likes.join(", ")}. Dislikes: ${dislikes.join(", ")}.`;
 
-    // 1. Call Groq API with fetch directly
+    // Call Groq API
     const response = await fetch(GROQ_API_URL, {
       method: "POST",
       headers: {
@@ -37,7 +37,7 @@ app.post("/recommend", async (req, res) => {
         "Authorization": `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: "meta-llama/llama-4-scout-17b-16e-instruct",  // Groq model
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: [{ role: "user", content: seed }],
         functions: [extractionFn],
         function_call: { name: "extract_preferences" }
@@ -46,42 +46,82 @@ app.post("/recommend", async (req, res) => {
 
     if (!response.ok) {
       const error = await response.json();
-      console.error("Grok API error:", error);
-      return res.status(500).json({ error: "Grok API error" });
+      console.error("Groq API error:", error);
+      return res.status(500).json({ error: "Groq API error" });
     }
 
     const gptResp = await response.json();
 
-    const { preferences, dislikes: avoid } = JSON.parse(
-      gptResp.choices[0].message.function_call.arguments
-    );
+    // Safe parse of function call arguments
+    let preferences = [];
+    let avoid = [];
+    try {
+      if (
+        gptResp.choices &&
+        gptResp.choices[0].message &&
+        gptResp.choices[0].message.function_call &&
+        gptResp.choices[0].message.function_call.arguments
+      ) {
+        const args = JSON.parse(gptResp.choices[0].message.function_call.arguments);
+        preferences = Array.isArray(args.preferences) ? args.preferences.map(p => p.toLowerCase()) : [];
+        avoid = Array.isArray(args.dislikes) ? args.dislikes.map(d => d.toLowerCase()) : [];
+      }
+    } catch (e) {
+      console.warn("Failed to parse Groq function_call arguments:", e);
+    }
 
-    // 2. Search TMDB and RAWG as before
+    // Fallback to prompt keywords if preferences empty
+    if (preferences.length === 0) {
+      preferences = prompt
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((w, i, arr) => w.length > 2 && arr.indexOf(w) === i)
+        .slice(0, 5);
+    }
+
+    // Build search query
     const query = encodeURIComponent(preferences.slice(0, 5).join(" "));
+
+    // Fetch TMDB and RAWG results
     const [tmdb, rawg] = await Promise.all([
       fetch(`https://api.themoviedb.org/3/search/multi?api_key=${process.env.TMDB_API_KEY}&query=${query}&page=1`).then(r => r.json()),
       fetch(`https://api.rawg.io/api/games?key=${process.env.RAWG_API_KEY}&search=${query}&page_size=5`).then(r => r.json())
     ]);
 
-    // 3. Merge results as before
+    // Merge results with improved matching
     const results = [
-      ...(tmdb.results || []).slice(0, 5).map(item => ({
-        id: item.id,
-        title: item.title || item.name,
-        type: item.media_type,
-        img: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-        why: preferences.filter(p => (item.overview || "").toLowerCase().includes(p)).join(", ")
-      })),
-      ...(rawg.results || []).map(g => ({
-        id: g.id,
-        title: g.name,
-        type: "game",
-        img: g.background_image,
-        why: preferences.filter(p => g.tags.some(t => t.name.toLowerCase().includes(p))).join(", ")
-      }))
+      ...(tmdb.results || []).slice(0, 5).map(item => {
+        const overview = (item.overview || "").toLowerCase();
+        const matchedPrefs = preferences.filter(p => overview.includes(p));
+        return {
+          id: item.id,
+          title: item.title || item.name,
+          type: item.media_type,
+          img: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
+          why: matchedPrefs.join(", ")
+        };
+      }),
+      ...(rawg.results || []).map(g => {
+        const tagNames = (g.tags || []).map(t => t.name.toLowerCase());
+        const matchedPrefs = preferences.filter(p => tagNames.some(tag => tag.includes(p)));
+        return {
+          id: g.id,
+          title: g.name,
+          type: "game",
+          img: g.background_image,
+          why: matchedPrefs.join(", ")
+        };
+      })
     ];
 
     res.json({ preferences, avoid, results });
+
+    /*Debug logs
+    console.log("Received prompt:", prompt);
+    console.log("Extracted preferences:", preferences);
+    console.log("Extracted dislikes:", avoid);
+    console.log("Merged results:", results);
+    */
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Something went wrong." });
